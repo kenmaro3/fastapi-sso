@@ -20,7 +20,7 @@ else:
     from typing_extensions import TypedDict
 
 DiscoveryDocument = TypedDict(
-    "DiscoveryDocument", {"authorization_endpoint": str, "token_endpoint": str, "userinfo_endpoint": str, "signup_agreement_endpoint": str,}
+    "DiscoveryDocument", {"authorization_endpoint": str, "token_endpoint": str, "userinfo_endpoint": str, "signup_endpoint": str, "signup_info_endpoint": str, "agreement_endpoint": str}
 )
 
 
@@ -37,6 +37,7 @@ class SSOLoginError(HTTPException):
 class SignUpInfo(pydantic.BaseModel):  # pylint: disable=no-member
     """Class (schema) to represent information got from sso provider in a common form."""
 
+    provider: Optional[str] = None
     id: Optional[str] = None
     name: Optional[str] = None
     birthday: Optional[str] = None
@@ -44,19 +45,30 @@ class SignUpInfo(pydantic.BaseModel):  # pylint: disable=no-member
     picture: Optional[str] = None
     sex: Optional[str] = None
     address: Optional[str] = None
-    phonenumber: Optional[str] = None
+    phone: Optional[str] = None
     email: Optional[str] = None
+
+class AgreementInfo(pydantic.BaseModel):  # pylint: disable=no-member
+    """Class (schema) to represent information got from sso provider in a common form."""
+
+    provider: Optional[str] = None
+    agreement_id: Optional[str] = None
+    user_id: Optional[str] = None
+    agreement: Optional[bool] = None
 
 class OpenID(pydantic.BaseModel):  # pylint: disable=no-member
     """Class (schema) to represent information got from sso provider in a common form."""
 
-    id: Optional[str] = None
-    email: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    display_name: Optional[str] = None
-    picture: Optional[str] = None
     provider: Optional[str] = None
+    id: Optional[str] = None
+    name: Optional[str] = None
+    birthday: Optional[str] = None
+    age: Optional[str] = None
+    picture: Optional[str] = None
+    sex: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
 
 
 # pylint: disable=too-many-instance-attributes
@@ -68,6 +80,7 @@ class SSOBase:
     client_secret: str = NotImplemented
     redirect_uri: Optional[str] = NotImplemented
     redirect_uri_signup: Optional[str] = NotImplemented
+    redirect_uri_agreement: Optional[str] = NotImplemented
     scope: List[str] = NotImplemented
     _oauth_client: Optional[WebApplicationClient] = None
     additional_headers: Optional[Dict[str, Any]] = None
@@ -78,6 +91,7 @@ class SSOBase:
         client_secret: str,
         redirect_uri: Optional[str] = None,
         redirect_uri_signup: Optional[str] = None,
+        redirect_uri_agreement: Optional[str] = None,
         allow_insecure_http: bool = False,
         use_state: bool = False,
         scope: Optional[List[str]] = None,
@@ -87,6 +101,7 @@ class SSOBase:
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         self.redirect_uri_signup = redirect_uri_signup
+        self.redirect_uri_agreement = redirect_uri_agreement
         self.allow_insecure_http = allow_insecure_http
         # TODO: Remove use_state argument and attribute
         if use_state:
@@ -132,11 +147,6 @@ class SSOBase:
         return self._refresh_token or self.oauth_client.refresh_token
 
     @classmethod
-    async def signup_info_from_response(cls, response: dict) -> SignUpInfo:
-        """Return {OpenID} object from provider's user info endpoint response"""
-        raise NotImplementedError(f"Provider {cls.provider} not supported")
-
-    @classmethod
     async def openid_from_response(cls, response: dict) -> OpenID:
         """Return {OpenID} object from provider's user info endpoint response"""
         raise NotImplementedError(f"Provider {cls.provider} not supported")
@@ -152,10 +162,16 @@ class SSOBase:
         return discovery.get("authorization_endpoint")
 
     @property
-    async def signup_agreement_endpoint(self) -> Optional[str]:
-        """Return `signup_agreement_endpoint` from discovery document"""
+    async def signup_endpoint(self) -> Optional[str]:
+        """Return `signup_endpoint` from discovery document"""
         discovery = await self.get_discovery_document()
-        return discovery.get("signup_agreement_endpoint")
+        return discovery.get("signup_endpoint")
+
+    @property
+    async def agreement_endpoint(self) -> Optional[str]:
+        """Return `agreement_endpoint` from discovery document"""
+        discovery = await self.get_discovery_document()
+        return discovery.get("agreement_endpoint")
 
     @property
     async def token_endpoint(self) -> Optional[str]:
@@ -168,6 +184,12 @@ class SSOBase:
         """Return `userinfo_endpoint` from discovery document"""
         discovery = await self.get_discovery_document()
         return discovery.get("userinfo_endpoint")
+
+    @property
+    async def signup_info_endpoint(self) -> Optional[str]:
+        """Return `signup_info_endpoint` from discovery document"""
+        discovery = await self.get_discovery_document()
+        return discovery.get("signup_info_endpoint")
 
     async def get_login_url(
         self,
@@ -221,7 +243,7 @@ class SSOBase:
         if redirect_uri is None:
             raise ValueError("redirect_uri must be provided, either at construction or request time")
         request_uri = self.oauth_client.prepare_request_uri(
-            await self.signup_agreement_endpoint, redirect_uri=redirect_uri, state=state, scope=self.scope, **params
+            await self.signup_endpoint, redirect_uri=redirect_uri, state=state, scope=self.scope, **params
         )
         return request_uri
 
@@ -271,13 +293,144 @@ class SSOBase:
             raise SSOLoginError(400, "'code' parameter was not found in callback request")
         self._state = request.query_params.get("state")
         return await self.process_signup(
-            code, request, params=params, additional_headers=headers, redirect_uri=redirect_uri_signup
+            code, request, params=params, additional_headers=headers, redirect_uri_signup=redirect_uri_signup
         )
+
+    async def verify_and_process_agreement(
+        self,
+        request: Request,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, Any]] = None,
+        redirect_uri_agreement: Optional[str] = None,
+    ) -> Optional[OpenID]:
+        """Get FastAPI (Starlette) Request object and process login.
+        This handler should be used for your /callback path.
+
+        Arguments:
+            request {Request} -- FastAPI request object (or Starlette)
+            params {Optional[Dict[str, Any]]} -- Optional additional query parameters to pass to the provider
+
+        Returns:
+            Optional[OpenID] -- OpenID if the login was successfull
+        """
+        headers = headers or {}
+        code = request.query_params.get("code")
+        if code is None:
+            raise SSOLoginError(400, "'code' parameter was not found in callback request")
+        self._state = request.query_params.get("state")
+        return await self.process_agreement(
+            code, request, params=params, additional_headers=headers, redirect_uri_agreement=redirect_uri_agreement
+        )
+
+    async def process_agreement(
+        self,
+        code: str,
+        request: Request,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        additional_headers: Optional[Dict[str, Any]] = None,
+        redirect_uri_agreement: Optional[str] = None,
+    ) -> Optional[OpenID]:
+        """This method should be called from callback endpoint to verify the user and request user info endpoint.
+        This is low level, you should use {verify_and_process} instead.
+
+        Arguments:
+            params {Optional[Dict[str, Any]]} -- Optional additional query parameters to pass to the provider
+            additional_headers {Optional[Dict[str, Any]]} -- Optional additional headers to be added to all requests
+        """
+        # pylint: disable=too-many-locals
+        params = params or {}
+        additional_headers = additional_headers or {}
+        additional_headers.update(self.additional_headers or {})
+        url = request.url
+        scheme = url.scheme
+        if not self.allow_insecure_http and scheme != "https":
+            current_url = str(url).replace("http://", "https://")
+            scheme = "https"
+        else:
+            current_url = str(url)
+        current_path = f"{scheme}://{url.netloc}{url.path}"
+
+        token_url, headers, body = self.oauth_client.prepare_token_request(
+            await self.token_endpoint,
+            authorization_response=current_url,
+            redirect_url=redirect_uri_agreement or self.redirect_uri_agreement or current_path,
+            code=code,
+            **params,
+        )  # type: ignore
+
+        if token_url is None:
+            return None
+
+        headers.update(additional_headers)
+
+        auth = httpx.BasicAuth(self.client_id, self.client_secret)
+        async with httpx.AsyncClient() as session:
+            response = await session.post(token_url, headers=headers, content=body, auth=auth)
+            content = response.json()
+            self._refresh_token = content.get("refresh_token")
+            self.oauth_client.parse_request_body_response(json.dumps(content))
+
+            uri, headers, _ = self.oauth_client.add_token(await self.userinfo_endpoint)
+            response = await session.get(uri, headers=headers)
+            content = response.json()
+
+        return await self.openid_from_response(content)
+
+
+    async def get_agreement_url(
+        self,
+        *,
+        agreement_redirect_uri: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        state: Optional[str] = None,
+    ) -> str:
+        """Return prepared login url. This is low-level, see {get_login_redirect} instead."""
+        params = params or {}
+        agreement_redirect_uri = agreement_redirect_uri or self.redirect_uri_agreement
+        if agreement_redirect_uri is None:
+            raise ValueError("redirect_uri must be provided, either at construction or request time")
+        required_scope = "agreement"
+        if required_scope not in self.scope:
+            raise ValueError("agreement not set in scope")
+        request_uri = self.oauth_client.prepare_request_uri(
+            await self.agreement_endpoint, redirect_uri=agreement_redirect_uri, state=state, scope=required_scope, **params
+        )
+        return request_uri
+
+    async def get_agreement_redirect(
+        self,
+        content: str,
+        *,
+        agreement_redirect_uri: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        state: Optional[str] = None,
+    ) -> RedirectResponse:
+        """Return redirect response by Stalette to login page of Oauth SSO provider
+
+        Arguments:
+            redirect_uri {Optional[str]} -- Override redirect_uri specified on this instance (default: None)
+            params {Optional[Dict[str, Any]]} -- Add additional query parameters to the login request.
+            state {Optional[str]} -- Add state parameter. This is useful if you want
+                                    the server to return something specific back to you.
+
+        Returns:
+            RedirectResponse -- Starlette response (may directly be returned from FastAPI)
+        """
+        if params is None:
+            params = {}
+        params.update({"content": content})
+        uri = await self.get_agreement_url(agreement_redirect_uri=agreement_redirect_uri, params=params, state=state)
+        response = RedirectResponse(uri, 303)
+        return response
+
 
     async def process_signup(
         self,
         code: str,
         request: Request,
+        message: str,
         *,
         params: Optional[Dict[str, Any]] = None,
         additional_headers: Optional[Dict[str, Any]] = None,
@@ -323,11 +476,11 @@ class SSOBase:
             self._refresh_token = content.get("refresh_token")
             self.oauth_client.parse_request_body_response(json.dumps(content))
 
-            uri, headers, _ = self.oauth_client.add_token(await self.userinfo_endpoint)
+            uri, headers, _ = self.oauth_client.add_token(await self.signup_info_endpoint)
             response = await session.get(uri, headers=headers)
             content = response.json()
 
-        return await self.signup_info_from_response(content)
+        return await self.openid_from_response(content)
 
     async def verify_and_process(
         self,
