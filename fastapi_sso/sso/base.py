@@ -430,7 +430,6 @@ class SSOBase:
         self,
         code: str,
         request: Request,
-        message: str,
         *,
         params: Optional[Dict[str, Any]] = None,
         additional_headers: Optional[Dict[str, Any]] = None,
